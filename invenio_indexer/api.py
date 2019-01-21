@@ -103,7 +103,7 @@ class RecordIndexer(object):
     #
     # High-level API
     #
-    def index(self, record):
+    def index(self, record, index=None, doc_type=None):
         """Index a record.
 
         The caller is responsible for ensuring that the record has already been
@@ -113,8 +113,11 @@ class RecordIndexer(object):
         when initializing ``RecordIndexer``.
 
         :param record: Record instance.
+        :param str index: Index to be used. (Default: ``None``)
+        :param str doc_type: Document type to be used. (Default: ``None``)
         """
-        index, doc_type = self.record_to_index(record)
+        if not (index and doc_type):
+            index, doc_type = self.record_to_index(record)
 
         return self.client.index(
             id=str(record.id),
@@ -125,19 +128,48 @@ class RecordIndexer(object):
             body=self._prepare_record(record, index, doc_type),
         )
 
-    def index_by_id(self, record_uuid):
+    def index_by_id(self, record_uuid, index=None, doc_type=None):
         """Index a record by record identifier.
 
         :param record_uuid: Record identifier.
+        :param str index: Index to be used. (Default: ``None``)
+        :param str doc_type: Document type to be used. (Default: ``None``)
         """
-        return self.index(Record.get_record(record_uuid))
+        return self.index(Record.get_record(record_uuid),
+                          index=index, doc_type=doc_type)
 
-    def delete(self, record):
+    def update_by_id(self, record_uuid, body, version=None,
+                     index=None, doc_type=None):
+        """Update a record by record identifier.
+
+        :param record_uuid: Record identifier.
+        :param dict body: Update script or partial document.
+        :param int version: Document version to be used. (Default: ``None``)
+        :param str index: Index to be used. (Default: ``None``)
+        :param str doc_type: Document type to be used. (Default: ``None``)
+        """
+        if not (index and doc_type):
+            record = Record.get_record(record_uuid)
+            index, doc_type = self.record_to_index(record)
+
+        return self.client.update(
+            id=str(record.id),
+            version=version,
+            version_type=self._version_type,
+            index=index,
+            doc_type=doc_type,
+            body=body,
+        )
+
+    def delete(self, record, index=None, doc_type=None):
         """Delete a record.
 
         :param record: Record instance.
+        :param str index: Index to be used. (Default: ``None``)
+        :param str doc_type: Document type to be used. (Default: ``None``)
         """
-        index, doc_type = self.record_to_index(record)
+        if not (index and doc_type):
+            index, doc_type = self.record_to_index(record)
 
         return self.client.delete(
             id=str(record.id),
@@ -155,6 +187,14 @@ class RecordIndexer(object):
         :param record_id_iterator: Iterator yielding record UUIDs.
         """
         self._bulk_op(record_id_iterator, 'index')
+
+    def bulk_update(self, record_id_and_doc_iterator):
+        """Bulk update records.
+
+        :param record_id_and_doc_iterator: Iterator yielding a 2-tuple of
+            record UUIDs and update payloads.
+        """
+        self._bulk_op(record_id_and_doc_iterator, 'update')
 
     def bulk_delete(self, record_id_iterator):
         """Bulk delete records from index.
@@ -234,6 +274,8 @@ class RecordIndexer(object):
             try:
                 if payload['op'] == 'delete':
                     yield self._delete_action(payload)
+                elif payload['op'] == 'update':
+                    yield self._update_action(payload)
                 else:
                     yield self._index_action(payload)
                 message.ack()
@@ -281,6 +323,26 @@ class RecordIndexer(object):
             '_version_type': self._version_type,
             '_source': self._prepare_record(record, index, doc_type),
         }
+
+    def _update_action(self, payload):
+        """Bulk update action.
+
+        :param payload: Decoded message body.
+        :returns: Dictionary defining an Elasticsearch bulk 'update' action.
+        """
+        doc = {
+            '_op_type': 'update',
+            '_index': payload['index'],
+            '_type': doc_type['doc_type'],
+            '_id': payload['id'],
+            'doc': payload['patch'],
+        }
+        if 'version' in payload:
+            doc.update({
+                '_version': payload['version'],
+                '_version_type': self._version_type,
+            })
+        return doc
 
     @staticmethod
     def _prepare_record(record, index, doc_type):
